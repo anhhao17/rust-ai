@@ -9,19 +9,16 @@
 //! classify --model mobilenetv2.onnx --labels imagenet_classes.txt --image dog.jpg
 //! ```
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Parser;
 use ndarray::Array4;
-use ort::{
-    execution_providers::{CPUExecutionProvider, CUDAExecutionProvider},
-    session::Session,
-    session::builder::GraphOptimizationLevel,
-    value::TensorRef,
-};
+use ort::{session::Session, value::TensorRef};
 use std::{fs, path::PathBuf};
 
 mod postprocess;
 mod preprocess;
+
+use vision_core::session::build_session;
 
 /// ImageNet input width expected by MobileNetV2.
 const INPUT_WIDTH: u32 = 224;
@@ -77,33 +74,6 @@ fn load_labels(path: &PathBuf) -> Result<Vec<String>> {
         anyhow::bail!("labels file is empty: {}", path.display());
     }
     Ok(labels)
-}
-
-/// Builds an ONNX Runtime session, preferring CUDA and falling back to CPU.
-///
-/// Tries to register the CUDA execution provider first.  If CUDA hardware or
-/// drivers are unavailable, ORT falls back silently to the CPU provider so the
-/// binary remains usable on any development machine.
-fn build_session(model_path: &PathBuf) -> Result<Session> {
-    let builder =
-        Session::builder().map_err(|e| anyhow!("failed to create ORT session builder: {e}"))?;
-
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!("failed to set optimization level: {}", e.message()))?;
-
-    let mut builder = builder
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
-        .map_err(|e| anyhow!("failed to register execution providers: {}", e.message()))?;
-
-    let session = builder
-        .commit_from_file(model_path)
-        .with_context(|| format!("failed to load model: {}", model_path.display()))?;
-
-    Ok(session)
 }
 
 /// Runs inference on `tensor` and returns the raw logits as a flat `Vec<f32>`.

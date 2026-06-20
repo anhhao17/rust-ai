@@ -1,0 +1,9 @@
+[package]
+name = "vision-core"
+version = "0.1.0"
+edition.workspace = true
+description = "Shared ONNX Runtime utilities for the vision pipeline (session building)"
+
+[dependencies]
+ort.workspace = true
+anyhow.workspace = true

@@ -21,15 +21,11 @@ use std::sync::Mutex;
 
 use anyhow::{Context, anyhow};
 use ndarray::Array4;
-use ort::{
-    execution_providers::{CPUExecutionProvider, CUDAExecutionProvider},
-    session::Session,
-    session::builder::GraphOptimizationLevel,
-    value::TensorRef,
-};
+use ort::{session::Session, value::TensorRef};
 
 use crate::postprocess;
 use crate::preprocess;
+use vision_core::session::build_session;
 
 /// ImageNet input width expected by MobileNetV2.
 pub const INPUT_WIDTH: u32 = 224;
@@ -126,28 +122,6 @@ impl Classifier {
 
         Ok(logits.to_vec())
     }
-}
-
-/// Builds an ONNX Runtime session from `model_path`, preferring CUDA and
-/// falling back to CPU.
-fn build_session(model_path: &Path) -> anyhow::Result<Session> {
-    let builder =
-        Session::builder().map_err(|e| anyhow!("failed to create ORT session builder: {e}"))?;
-
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!("failed to set optimization level: {}", e.message()))?;
-
-    let mut builder = builder
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
-        .map_err(|e| anyhow!("failed to register execution providers: {}", e.message()))?;
-
-    builder
-        .commit_from_file(model_path)
-        .with_context(|| format!("failed to load model: {}", model_path.display()))
 }
 
 /// Loads the text file at `path`, returning one label string per line.

@@ -1,0 +1,14 @@
+[workspace]
+members = ["vision-core", "classify", "detect", "server", "counter"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+# ONNX Runtime — CUDA EP + CPU fallback (downloads the prebuilt dylib automatically).
+# Bumping this version in one place updates all workspace members.
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+
+# Ergonomic error handling used across every crate.
+anyhow = "1"

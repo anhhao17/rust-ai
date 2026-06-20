@@ -233,6 +233,7 @@ async fn live_health_returns_200_and_json() {
     );
 
     child.kill().ok();
+    child.wait().ok();
 }
 
 /// POST /classify with a valid image → 200 or 503 depending on model presence;
@@ -284,6 +285,7 @@ async fn live_classify_with_valid_image_returns_json() {
     let _body: serde_json::Value = resp.json().await.expect("response body must be valid JSON");
 
     child.kill().ok();
+    child.wait().ok();
 }
 
 /// POST /classify with no multipart body → 400 (bad_request); server must
@@ -337,6 +339,7 @@ async fn live_classify_empty_body_returns_400_or_503_not_500() {
     );
 
     child.kill().ok();
+    child.wait().ok();
 }
 
 /// POST /classify with non-image bytes (random garbage) → 400 or 503.
@@ -401,6 +404,7 @@ async fn live_classify_non_image_bytes_returns_400_or_503_not_500() {
     assert_eq!(resp2.status(), 200);
 
     child.kill().ok();
+    child.wait().ok();
 }
 
 /// POST /classify with wrong multipart field name (not "image") → 400 or 503.
@@ -447,6 +451,7 @@ async fn live_classify_wrong_field_name_returns_400_or_503() {
     assert_ne!(status, 500, "wrong field name must not produce a 500");
 
     child.kill().ok();
+    child.wait().ok();
 }
 
 /// POST /classify with a malformed multipart body (missing boundary) → 400/422
@@ -488,7 +493,7 @@ async fn live_classify_malformed_multipart_returns_4xx_or_503_not_500() {
 
     let status = resp.status().as_u16();
     assert!(
-        status >= 400 && status < 600,
+        (400..600).contains(&status),
         "malformed multipart must yield 4xx or 5xx, not {status}"
     );
     assert_ne!(status, 500, "malformed multipart must not produce a 500");
@@ -502,4 +507,5 @@ async fn live_classify_malformed_multipart_returns_4xx_or_503_not_500() {
     assert_eq!(resp2.status(), 200);
 
     child.kill().ok();
+    child.wait().ok();
 }

@@ -1,15 +1,18 @@
 [package]
 name = "classify"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 description = "MobileNetV2 image classifier CLI using ONNX Runtime"
 
 [dependencies]
+# Shared session builder and other workspace utilities
+vision-core = { path = "../vision-core" }
+
 # Argument parsing
 clap = { version = "4", features = ["derive"] }
 
 # ONNX Runtime bindings — download the ORT dylib automatically
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+ort.workspace = true
 
 # Image loading and resizing
 image = "0.25"
@@ -18,7 +21,7 @@ image = "0.25"
 ndarray = "0.17"
 
 # Error handling
-anyhow = "1"
+anyhow.workspace = true
 
 [dev-dependencies]
 approx = "0.5"

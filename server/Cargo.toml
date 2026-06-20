@@ -1,10 +1,13 @@
 [package]
 name = "server"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 description = "Edge inference REST server — MobileNetV2 image classification over HTTP"
 
 [dependencies]
+# Shared session builder and other workspace utilities
+vision-core = { path = "../vision-core" }
+
 # Async web framework
 axum = { version = "0.8", features = ["multipart"] }
 
@@ -20,7 +23,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 tower = { version = "0.5", features = ["util"] }
 
 # ONNX Runtime — CUDA EP registered; falls back to CPU automatically on non-GPU hosts
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+ort.workspace = true
 
 # Image decoding from raw bytes
 image = "0.25"
@@ -29,7 +32,7 @@ image = "0.25"
 ndarray = "0.17"
 
 # Error handling
-anyhow = "1"
+anyhow.workspace = true
 
 # Config: CLI args with env var fallback
 clap = { version = "4", features = ["derive", "env"] }

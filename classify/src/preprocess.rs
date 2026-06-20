@@ -75,8 +75,8 @@ mod tests {
     #[test]
     fn normalize_pixel_zero_maps_to_negative_mean_over_std() {
         // pixel value 0 → scaled = 0.0 → (0 - mean) / std
-        for c in 0..3 {
-            let expected = -IMAGENET_MEAN[c] / IMAGENET_STD[c];
+        for (c, &mean) in IMAGENET_MEAN.iter().enumerate() {
+            let expected = -mean / IMAGENET_STD[c];
             assert_abs_diff_eq!(normalize_pixel(0, c), expected, epsilon = 1e-6);
         }
     }
@@ -84,8 +84,8 @@ mod tests {
     #[test]
     fn normalize_pixel_max_maps_to_one_minus_mean_over_std() {
         // pixel value 255 → scaled = 1.0 → (1 - mean) / std
-        for c in 0..3 {
-            let expected = (1.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
+        for (c, &mean) in IMAGENET_MEAN.iter().enumerate() {
+            let expected = (1.0 - mean) / IMAGENET_STD[c];
             assert_abs_diff_eq!(normalize_pixel(255, c), expected, epsilon = 1e-6);
         }
     }
@@ -94,8 +94,8 @@ mod tests {
     fn normalize_pixel_mean_value_maps_to_zero() {
         // A pixel value that equals the channel mean should normalize to ~0.
         // We approximate mean*255 and round to the nearest u8.
-        for c in 0..3 {
-            let approx_mean_byte = (IMAGENET_MEAN[c] * 255.0).round() as u8;
+        for (c, &mean) in IMAGENET_MEAN.iter().enumerate() {
+            let approx_mean_byte = (mean * 255.0).round() as u8;
             let result = normalize_pixel(approx_mean_byte, c);
             // Rounding introduces up to 0.5/255 / std error, which is < 0.012.
             assert!(

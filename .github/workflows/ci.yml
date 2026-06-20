@@ -38,11 +38,11 @@ jobs:
       # Don't abort the detect job just because classify failed (or vice
       # versa) — surface both crates' results in one run.
       fail-fast: false
-      # The repo is NOT a cargo workspace: classify/ and detect/ are two
-      # independent crates. A matrix over crate directories keeps this DRY and
-      # scales to N crates by adding one line here.
+      # The repo is a cargo workspace; each member dir is still a valid standalone
+      # crate target. A matrix over member directories keeps this DRY and scales
+      # to N crates by adding one line here.
       matrix:
-        crate: [classify, detect, server, counter]
+        crate: [classify, detect, server, counter, vision-core]
 
     defaults:
       run:
