@@ -1,0 +1,104 @@
+# CI pipeline — enforces the CLAUDE.md merge gates automatically.
+#
+# Every gate that rust-qa/rust-senior check by hand (fmt, clippy, build, test)
+# runs here on each PR to main and on pushes to main, so a PR cannot be merged
+# green unless it passes the same gauntlet the agents enforce.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel an in-progress run if newer commits are pushed to the same ref —
+# saves CI minutes on rapid PR iteration.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fail the build on warnings everywhere (belt-and-suspenders alongside the
+  # explicit `clippy -- -D warnings` step) and make Cargo output deterministic.
+  CARGO_TERM_COLOR: always
+  # ort downloads a prebuilt ONNX Runtime binary at build time (its default
+  # `download-binaries` feature). That prebuilt lib bundles the CUDA execution
+  # provider but does NOT require the CUDA toolkit or a GPU to be present to
+  # build or link — CUDA is only dlopen'd at runtime if the CUDA EP is actually
+  # selected. Both crates already register CUDA first and fall back to CPU, and
+  # the test suites are pure CPU computation (no model file, GPU, or camera), so
+  # this workflow runs entirely on a CUDA-less x86 ubuntu-latest runner.
+
+jobs:
+  ci:
+    name: ${{ matrix.crate }} (fmt / clippy / build / test)
+    runs-on: ubuntu-latest # x86 CI box — no CUDA/GPU; see env note above.
+
+    strategy:
+      # Don't abort the detect job just because classify failed (or vice
+      # versa) — surface both crates' results in one run.
+      fail-fast: false
+      # The repo is NOT a cargo workspace: classify/ and detect/ are two
+      # independent crates. A matrix over crate directories keeps this DRY and
+      # scales to N crates by adding one line here.
+      matrix:
+        crate: [classify, detect]
+
+    defaults:
+      run:
+        # Every step runs inside the crate directory so plain `cargo <cmd>`
+        # operates on the right crate without per-step `--manifest-path`.
+        working-directory: ${{ matrix.crate }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt + clippy)
+        # dtolnay/rust-toolchain is the current well-maintained successor to
+        # actions-rs (which is archived). Pin the channel; pull in the two
+        # components the gates need.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        # Keyed per crate (via the prefix) so the two crates don't clobber each
+        # other's cache. Also keys on the lockfile by default for correctness.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+          prefix-key: v1-${{ matrix.crate }}
+
+      # --- The CLAUDE.md merge gauntlet — each gate is its own step so a
+      #     failure points at exactly which gate broke. ---
+
+      - name: Format check (cargo fmt --check)
+        run: cargo fmt --check
+
+      - name: Lint (cargo clippy -- -D warnings)
+        run: cargo clippy -- -D warnings
+
+      - name: Build (cargo build --verbose)
+        run: cargo build --verbose
+
+      - name: Test (cargo test --verbose)
+        run: cargo test --verbose
+
+  # ---------------------------------------------------------------------------
+  # Cross-compile + deploy to Jetson Orin NX target — deferred to a later
+  # milestone. This is an intentional placeholder: the deploy/CD side (ARM64
+  # cross-build, push to device, on-target smoke test) is out of scope for now.
+  #
+  # `if: false` keeps the job defined and visible but never schedules it, so the
+  # shape is ready to fill in without affecting current CI. `needs: ci` wires it
+  # downstream of the gates so it can only ever run after CI passes.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Jetson Orin NX (deferred)
+    needs: ci
+    if: false # TODO(milestone): implement ARM64 cross-compile + on-device deploy.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: echo "Deploy to Jetson Orin NX is deferred to a later milestone."
