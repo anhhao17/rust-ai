@@ -1,0 +1,37 @@
+[package]
+name = "detect"
+version = "0.1.0"
+edition = "2024"
+description = "YOLOv8 real-time object detector with bounding-box overlay"
+
+[dependencies]
+# Argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# ONNX Runtime — CUDA + CPU fallback (downloads ORT dylib automatically)
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+
+# Image loading, resizing, and saving
+image = "0.25"
+
+# Drawing bounding boxes and labels on images
+imageproc = "0.27"
+
+# Numerical array layout (NCHW tensors)
+ndarray = "0.17"
+
+# Error handling
+anyhow = "1"
+
+# Camera capture — V4L2 on Linux/Jetson, native on other platforms
+nokhwa = { version = "0.10", features = ["input-v4l", "output-threaded"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+# CLI black-box testing
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+
+# Parameterized tests
+rstest = "0.26.1"
