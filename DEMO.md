@@ -10,6 +10,11 @@ CPU transparently — this is expected on a dev box with no GPU.
 
 ## Quick start
 
+> **Note:** `setup-demo.sh` may install `ultralytics`, `onnx`, and `onnxslim`
+> into the system Python environment via `pip3 install --break-system-packages`
+> if those packages are not already present.  See the script's header comment
+> if you prefer to install them in a virtualenv instead.
+
 ```bash
 # 1. Download / export all assets (idempotent — safe to re-run)
 bash scripts/setup-demo.sh

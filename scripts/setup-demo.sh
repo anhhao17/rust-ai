@@ -13,8 +13,16 @@
 #     sample.jpg             — sample image for classify / detect / server
 #     frames/                — JPEG frames extracted from sample video (counter)
 #
-# Requirements: curl, python3+ultralytics (for yolov8n export), ffmpeg (frames)
+# Requirements: wget, python3, ffmpeg.
 # All are checked below and the script reports clearly if something is missing.
+#
+# NOTE — system Python packages: if ultralytics, onnx, or onnxslim are not
+# already installed, this script installs them via
+#   pip3 install <pkg> --break-system-packages
+# which writes packages into the OS-managed Python environment (bypasses the
+# PEP 668 externally-managed-environment guard on Debian/Ubuntu).  If you
+# prefer to keep the system Python untouched, install those packages yourself
+# in a virtualenv first, activate it, and then re-run this script.
 
 set -euo pipefail
 
@@ -40,21 +48,21 @@ require_cmd() {
 # ---------------------------------------------------------------------------
 
 info "Checking required tools..."
-require_cmd curl
 require_cmd wget
 require_cmd python3
 require_cmd ffmpeg
 
 # ultralytics + onnx are needed for the YOLOv8 export.  Install them if absent.
-# We use --break-system-packages because Debian bookworm ships Python as
-# "externally managed" and blocks pip install without this flag.
+# IMPORTANT: any missing package is installed into the SYSTEM Python via
+# `pip3 install --break-system-packages`, bypassing the PEP 668 guard.  See
+# the header comment above if you want to avoid mutating the system environment.
 MISSING_PY_PKGS=()
 python3 -c "import ultralytics" 2>/dev/null || MISSING_PY_PKGS+=(ultralytics)
 python3 -c "import onnx"        2>/dev/null || MISSING_PY_PKGS+=(onnx)
 python3 -c "import onnxslim"    2>/dev/null || MISSING_PY_PKGS+=(onnxslim)
 
 if [[ ${#MISSING_PY_PKGS[@]} -gt 0 ]]; then
-    info "Installing missing Python packages: ${MISSING_PY_PKGS[*]}"
+    info "Installing ${MISSING_PY_PKGS[*]} into the system Python via pip3 --break-system-packages"
     pip3 install "${MISSING_PY_PKGS[@]}" --break-system-packages \
         || die "pip install failed.  Run manually:
   pip3 install ${MISSING_PY_PKGS[*]} --break-system-packages
@@ -135,15 +143,10 @@ SAMPLE_IMG="$ASSETS/sample.jpg"
 if [[ -f "$SAMPLE_IMG" ]]; then
     skip "sample.jpg"
 else
-    info "Downloading sample image (people + objects)..."
-    # Public-domain photo from Wikimedia: a street scene with pedestrians.
-    # Using a stable, redirect-free URL.
+    info "Downloading sample image (Labrador — good for MobileNetV2 + YOLOv8)..."
+    # Public-domain dog photo; MobileNetV2 classifies it as Labrador retriever at ~95%.
     wget -q --show-progress \
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/320px-Camponotus_flavomarginatus_ant.jpg" \
-        -O "$ASSETS/sample_ant.jpg"
-    # Also grab a better "objects" image — a dog photo works well for MobileNetV2.
-    wget -q --show-progress \
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/YellowLabradorLooking_new.jpg/320px-YellowLabradorLooking_new.jpg" \
+        "https://images.dog.ceo/breeds/labrador/n02099712_4323.jpg" \
         -O "$SAMPLE_IMG"
     ok "sample.jpg"
 fi
