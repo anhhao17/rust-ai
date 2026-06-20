@@ -26,6 +26,12 @@ anyhow = "1"
 # Camera capture — V4L2 on Linux/Jetson, native on other platforms
 nokhwa = { version = "0.10", features = ["input-v4l", "output-threaded"] }
 
-
 [dev-dependencies]
 approx = "0.5"
+
+# CLI black-box testing
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+
+# Parameterized tests
+rstest = "0.26.1"
