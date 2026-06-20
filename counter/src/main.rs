@@ -126,11 +126,15 @@ struct Args {
     #[arg(long, default_value = DEFAULT_BIND_ADDR)]
     bind: SocketAddr,
 
-    /// Loop the source after it is exhausted (default: on for finite sources).
-    /// Automatically disabled for live sources (camera, network stream).
-    /// Pass `--no-loop` to play a file once and then keep the server alive.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    loop_source: bool,
+    /// Do not loop the source after it is exhausted.
+    ///
+    /// By default, finite sources (image directories, video files) loop
+    /// continuously.  Pass `--no-loop` to play through once and then keep the
+    /// server alive at the last frame count until Ctrl-C.
+    ///
+    /// Live sources (network streams, camera) never loop regardless of this flag.
+    #[arg(long)]
+    no_loop: bool,
 
     /// Cap output to at most N frames per second.  0 = uncapped (default).
     /// Useful for file playback at a natural rate and for reducing CPU load on
@@ -185,8 +189,9 @@ async fn main() -> Result<()> {
     let source_kind = detect_source_kind(&args.source)
         .with_context(|| format!("invalid --source '{}'", args.source))?;
 
-    // Live sources cannot loop — override any explicit --loop-source=true.
-    let should_loop = args.loop_source && source_kind.is_finite();
+    // Finite sources loop by default; --no-loop plays once.
+    // Live sources (network/camera) never loop regardless of --no-loop.
+    let should_loop = !args.no_loop && source_kind.is_finite();
 
     tracing::info!(
         source = %args.source,
@@ -242,13 +247,10 @@ async fn main() -> Result<()> {
             run_frame_dir_loop(dir_path, should_loop, min_frame_interval, &mut ctx).await?;
         }
         SourceKind::VideoFile(ref file_path) => {
-            run_ffmpeg_loop(
-                file_path.to_str().unwrap_or_default(),
-                should_loop,
-                min_frame_interval,
-                &mut ctx,
-            )
-            .await?;
+            let path_str = file_path
+                .to_str()
+                .ok_or_else(|| anyhow!("non-UTF-8 source path: {}", file_path.display()))?;
+            run_ffmpeg_loop(path_str, should_loop, min_frame_interval, &mut ctx).await?;
         }
         SourceKind::NetworkStream(ref url) => {
             // Network sources never loop; `should_loop` was already set to false.

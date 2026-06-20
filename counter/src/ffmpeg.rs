@@ -180,6 +180,21 @@ fn read_frames_from_pipe(mut reader: impl Read, tx: mpsc::Sender<Result<DynamicI
             }
         };
 
+        // Guard against unbounded growth when ffmpeg emits output that contains
+        // no SOI markers (e.g. a non-video stream or a misconfigured pipeline).
+        // If the accumulated buffer would exceed the per-frame cap, discard it
+        // and report an error so the caller can recover gracefully rather than
+        // exhausting process memory.
+        // Note: `-vcodec mjpeg` output never contains embedded-thumbnail SOIs,
+        // so every SOI in the pipe is a genuine frame boundary.
+        if buf.len() + bytes_read > MAX_JPEG_FRAME_BYTES {
+            let _ = tx.send(Err(anyhow!(
+                "ffmpeg pipe buffer exceeded {MAX_JPEG_FRAME_BYTES} bytes without a frame \
+                 boundary — discarding and resetting (check that ffmpeg is emitting MJPEG)"
+            )));
+            buf.clear();
+        }
+
         buf.extend_from_slice(&read_buf[..bytes_read]);
 
         // Extract all complete JPEG frames from the accumulated buffer.

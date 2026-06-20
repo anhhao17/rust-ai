@@ -101,7 +101,7 @@ The `--source` value is auto-detected in this order:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--fps N` | 0 (uncapped) | Cap inference output to N frames per second.  Useful for file playback at natural speed or for reducing CPU load. |
-| `--loop-source` / `--no-loop` | on for finite sources | Loop the source after it is exhausted.  Automatically disabled for live sources (camera, network stream). |
+| `--no-loop` | off (finite sources loop by default) | Play the source once and stop.  Has no effect on live sources (camera, network stream), which never loop. |
 | `--conf F` | 0.25 | Minimum detection confidence (0–1). |
 | `--nms-iou F` | 0.45 | IoU threshold for non-maximum suppression. |
 | `--bind ADDR` | 0.0.0.0:3000 | TCP address for the dashboard HTTP server. |
