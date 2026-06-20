@@ -42,7 +42,7 @@ jobs:
       # independent crates. A matrix over crate directories keeps this DRY and
       # scales to N crates by adding one line here.
       matrix:
-        crate: [classify, detect, server]
+        crate: [classify, detect, server, counter]
 
     defaults:
       run:
