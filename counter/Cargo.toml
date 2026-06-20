@@ -2,7 +2,7 @@
 name = "counter"
 version = "0.1.0"
 edition.workspace = true
-description = "People counter with YOLOv8 person detection, multi-object tracking, line-crossing counting, and a live dashboard"
+description = "People counter with YOLOv8 person detection, multi-object tracking, line-crossing counting, and a live MJPEG dashboard"
 
 [features]
 # Camera capture via V4L2 — disabled by default so the crate builds and all
@@ -19,8 +19,15 @@ clap = { version = "4", features = ["derive"] }
 # ONNX Runtime — CUDA EP registered; falls back to CPU automatically on non-GPU hosts
 ort.workspace = true
 
-# Image loading and resizing
-image = "0.25"
+# Image loading, resizing, and JPEG encoding (built-in JPEG codec)
+image = { version = "0.25", features = ["jpeg"] }
+
+# Drawing bounding boxes, lines, and text onto frames
+imageproc = "0.27"
+
+# Font rasterisation used by imageproc's draw_text_mut.
+# We embed a TTF font via include_bytes! so no runtime font path is needed.
+ab_glyph = "0.2"
 
 # NCHW tensor layout
 ndarray = "0.17"
@@ -41,6 +48,10 @@ serde_json = "1"
 # Structured logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Streaming body for the MJPEG /stream endpoint
+futures-util = "0.3"
+bytes = "1"
 
 # Camera capture — only compiled when the `camera` feature is enabled
 nokhwa = { version = "0.10", features = ["input-v4l", "output-threaded"], optional = true }
