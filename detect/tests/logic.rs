@@ -5,6 +5,11 @@
 //! include the relevant source modules directly via `#[path]` attributes.
 //! No ONNX model, GPU, or camera is required — all tests are pure computation.
 
+// rstest expands parameterized test functions that clippy counts as having "too
+// many arguments" (one per #[case] parameter).  This is inherent to the macro
+// and not a real code-quality issue; silence the lint for this file.
+#![allow(clippy::too_many_arguments)]
+
 use rstest::rstest;
 
 // Pull in the pure modules under test.  The `coco_labels` module is also
@@ -138,6 +143,7 @@ fn iou_identical_boxes_is_one(#[case] x1: f32, #[case] y1: f32, #[case] x2: f32,
 }
 
 /// IoU between fully disjoint boxes must be 0.0.
+#[allow(clippy::too_many_arguments)]
 #[rstest]
 #[case(0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 30.0, 30.0)]
 #[case(0.0, 0.0, 5.0, 5.0, 6.0, 6.0, 11.0, 11.0)]
@@ -167,6 +173,7 @@ fn iou_half_overlap_equals_one_third() {
 }
 
 /// Zero-area (degenerate) boxes must not cause a panic.
+#[allow(clippy::too_many_arguments)]
 #[rstest]
 #[case(5.0, 5.0, 5.0, 5.0, 0.0, 0.0, 10.0, 10.0)] // point vs box
 #[case(5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0)] // point vs point
@@ -253,6 +260,7 @@ fn letterbox_square_has_no_padding(#[case] side: u32, #[case] expected_scale: f3
 
 /// Injecting a known model-space box into a tensor and decoding it should
 /// yield corners within ±0.5 px of the manual inversion formula.
+#[allow(clippy::too_many_arguments)]
 #[rstest]
 // (orig_w, orig_h, cx, cy, bw, bh, scale, pad_x, pad_y)
 #[case(640, 640, 320.0, 320.0, 100.0, 80.0, 1.0, 0, 0)]

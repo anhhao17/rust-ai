@@ -15,7 +15,7 @@
 //! detect --model yolov8n.onnx camera --device 0 --output-dir ./frames
 //! ```
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use image::DynamicImage;
 use ndarray::Array4;
@@ -24,18 +24,15 @@ use nokhwa::{
     pixel_format::RgbFormat,
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
 };
-use ort::{
-    execution_providers::{CPUExecutionProvider, CUDAExecutionProvider},
-    session::Session,
-    session::builder::GraphOptimizationLevel,
-    value::TensorRef,
-};
+use ort::{session::Session, value::TensorRef};
 use std::path::PathBuf;
 
 mod coco_labels;
 mod draw;
 mod postprocess;
 mod preprocess;
+
+use vision_core::session::build_session;
 
 /// Default confidence threshold for filtering detections.
 const DEFAULT_CONF_THRESHOLD: f32 = 0.25;
@@ -125,29 +122,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Builds an ORT session with CUDA preferred, CPU as fallback.
-fn build_session(model_path: &PathBuf) -> Result<Session> {
-    let builder =
-        Session::builder().map_err(|e| anyhow!("failed to create ORT session builder: {e}"))?;
-
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!("failed to set optimization level: {}", e.message()))?;
-
-    let mut builder = builder
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
-        .map_err(|e| anyhow!("failed to register execution providers: {}", e.message()))?;
-
-    let session = builder
-        .commit_from_file(model_path)
-        .with_context(|| format!("failed to load model: {}", model_path.display()))?;
-
-    Ok(session)
 }
 
 /// Detects objects in a single image and saves the annotated result.

@@ -39,12 +39,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ndarray::Array4;
-use ort::{
-    execution_providers::{CPUExecutionProvider, CUDAExecutionProvider},
-    session::Session,
-    session::builder::GraphOptimizationLevel,
-    value::TensorRef,
-};
+use ort::{session::Session, value::TensorRef};
 use tracing_subscriber::EnvFilter;
 
 mod dashboard;
@@ -56,6 +51,7 @@ mod tracker;
 use dashboard::CountState;
 use line_counter::{CountTally, CountingLine, LineCounter};
 use tracker::Tracker;
+use vision_core::session::build_session;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,7 +149,7 @@ async fn main() -> Result<()> {
     tracing::info!(bind = %args.bind, "dashboard started");
 
     // Load the model.  Missing model file → clear error and exit, no panic.
-    let mut session = build_ort_session(&args.model)?;
+    let mut session = build_session(&args.model)?;
 
     // Collect frames from the input path.
     let frame_paths = collect_frame_paths(&args.input)?;
@@ -231,33 +227,6 @@ async fn run_dashboard(state: CountState, bind_addr: SocketAddr) -> Result<()> {
         .context("dashboard server exited with error")?;
 
     Ok(())
-}
-
-/// Builds an ORT session with CUDA preferred, falling back to CPU.
-///
-/// # Errors
-///
-/// Returns `Err` if the model file does not exist or cannot be parsed.
-fn build_ort_session(model_path: &PathBuf) -> Result<Session> {
-    let builder =
-        Session::builder().map_err(|e| anyhow!("failed to create ORT session builder: {e}"))?;
-
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!("failed to set optimization level: {}", e.message()))?;
-
-    let mut builder = builder
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
-        .map_err(|e| anyhow!("failed to register execution providers: {}", e.message()))?;
-
-    let session = builder
-        .commit_from_file(model_path)
-        .with_context(|| format!("failed to load model: {}", model_path.display()))?;
-
-    Ok(session)
 }
 
 /// Runs ORT inference on one NCHW tensor and returns the flat output slice.

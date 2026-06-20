@@ -1,15 +1,18 @@
 [package]
 name = "detect"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 description = "YOLOv8 real-time object detector with bounding-box overlay"
 
 [dependencies]
+# Shared session builder and other workspace utilities
+vision-core = { path = "../vision-core" }
+
 # Argument parsing
 clap = { version = "4", features = ["derive"] }
 
 # ONNX Runtime — CUDA + CPU fallback (downloads ORT dylib automatically)
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+ort.workspace = true
 
 # Image loading, resizing, and saving
 image = "0.25"
@@ -21,7 +24,7 @@ imageproc = "0.27"
 ndarray = "0.17"
 
 # Error handling
-anyhow = "1"
+anyhow.workspace = true
 
 # Camera capture — V4L2 on Linux/Jetson, native on other platforms
 nokhwa = { version = "0.10", features = ["input-v4l", "output-threaded"] }
