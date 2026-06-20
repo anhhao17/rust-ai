@@ -1,0 +1,24 @@
+[package]
+name = "classify"
+version = "0.1.0"
+edition = "2024"
+description = "MobileNetV2 image classifier CLI using ONNX Runtime"
+
+[dependencies]
+# Argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# ONNX Runtime bindings — download the ORT dylib automatically
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+
+# Image loading and resizing
+image = "0.25"
+
+# Numerical array layout (NCHW tensors)
+ndarray = "0.17"
+
+# Error handling
+anyhow = "1"
+
+[dev-dependencies]
+approx = "0.5"
