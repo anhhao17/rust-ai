@@ -45,3 +45,7 @@ approx = "0.5"
 # Oneshot HTTP tests against axum handlers
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
+
+# Black-box HTTP integration tests — spawns the compiled binary on an ephemeral
+# port and exercises it over real HTTP without a model or GPU present.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
