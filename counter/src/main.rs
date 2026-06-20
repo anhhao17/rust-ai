@@ -1,57 +1,61 @@
 //! `counter` — people counter with YOLOv8 detection, multi-object tracking,
-//! line-crossing counting, and a live dashboard.
+//! line-crossing counting, annotated MJPEG video stream, and a live dashboard.
 //!
 //! # What it does
 //!
 //! 1. Loads a YOLOv8n ONNX model (person class only).
-//! 2. Reads frames from a video file (or image directory) via the `image` crate.
+//! 2. Reads frames from an image directory, loops when exhausted so the demo
+//!    keeps playing indefinitely.
 //! 3. Runs per-frame person detection → multi-object tracking → line-crossing
 //!    counting.
-//! 4. Publishes the live count on a small axum dashboard.
+//! 4. Annotates each frame (bounding boxes, track IDs, counting line, counts
+//!    overlay) and publishes the JPEG to a `tokio::sync::watch` channel.
+//! 5. Serves a live dashboard over HTTP:
+//!    - `GET /`       — HTML page with embedded MJPEG stream and count stats
+//!    - `GET /stream` — MJPEG video stream
+//!    - `GET /count`  — live count as JSON
+//!    - `GET /health` — liveness probe
 //!
 //! # Usage
 //!
 //! ```text
-//! counter --model yolov8n.onnx --input frames/ \
-//!         --line-x1 0 --line-y1 360 --line-x2 1280 --line-y2 360
+//! counter --model yolov8n.onnx --input assets/walk-frames/ \
+//!         --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576
 //! ```
 //!
 //! Dashboard: http://localhost:3000/
-//! Count API:  http://localhost:3000/count
+//! Stream:    http://localhost:3000/stream
+//! Count API: http://localhost:3000/count
 //!
 //! # Cargo features
 //!
-//! - `camera` (default: **off**) — enables live V4L2 camera capture.  Not
-//!   needed (and not compiled) when running on an x86 dev box or in CI.
+//! - `camera` (default: **off**) — enables live V4L2 camera capture.
 //!
 //! # On-Jetson / CUDA note
 //!
-//! The session builder registers CUDA first then falls back to CPU, matching
-//! the pattern in the `detect` and `server` crates.  No GPU or model file is
-//! required for `cargo build` or `cargo test`.
+//! The session builder registers CUDA first then falls back to CPU.  No GPU or
+//! model file is required for `cargo build` or `cargo test`.
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
+use bytes::Bytes;
 use clap::Parser;
 use ndarray::Array4;
 use ort::{session::Session, value::TensorRef};
 use tracing_subscriber::EnvFilter;
+use vision_core::session::build_session;
 
 mod dashboard;
+mod draw;
 mod line_counter;
 mod postprocess;
 mod preprocess;
 mod tracker;
 
-use dashboard::CountState;
-use line_counter::{CountTally, CountingLine, LineCounter};
+use dashboard::SharedAppState;
+use line_counter::{CountingLine, LineCounter};
 use tracker::Tracker;
-use vision_core::session::build_session;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,7 +79,7 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:3000";
 #[command(
     name = "counter",
     version,
-    about = "People counter — YOLOv8 detection + tracking + line-crossing + live dashboard"
+    about = "People counter — YOLOv8 detection + tracking + line-crossing + MJPEG live dashboard"
 )]
 struct Args {
     /// Path to the YOLOv8n ONNX model file.
@@ -83,6 +87,8 @@ struct Args {
     model: PathBuf,
 
     /// Input: path to a single image file or a directory of JPEG/PNG images.
+    /// When all images are processed the loop restarts from the beginning so
+    /// the demo plays continuously.
     #[arg(long, value_name = "PATH")]
     input: PathBuf,
 
@@ -132,13 +138,12 @@ async fn main() -> Result<()> {
         end: (args.line_x2, args.line_y2),
     };
 
-    // Start with a zero count; the dashboard reflects this even before any
-    // frames are processed.
-    let count_state: CountState = Arc::new(Mutex::new(CountTally::default()));
+    // Build shared state and the frame-publishing channel.
+    let (app_state, frame_tx) = dashboard::new_state();
 
     // Spawn the dashboard server in a background task so inference runs
     // concurrently with the HTTP server without blocking either.
-    let dashboard_state = Arc::clone(&count_state);
+    let dashboard_state: SharedAppState = Arc::clone(&app_state);
     let bind_addr = args.bind;
     tokio::spawn(async move {
         if let Err(err) = run_dashboard(dashboard_state, bind_addr).await {
@@ -146,65 +151,90 @@ async fn main() -> Result<()> {
         }
     });
 
-    tracing::info!(bind = %args.bind, "dashboard started");
+    tracing::info!(bind = %args.bind, "dashboard started — open http://{}/", args.bind);
 
-    // Load the model.  Missing model file → clear error and exit, no panic.
+    // Load the font once at startup; reused for every frame annotation.
+    let font = draw::load_font().context("failed to load embedded font")?;
+
+    // Load the model.  Missing model file → clear error and exit.
     let mut session = build_session(&args.model)?;
 
-    // Collect frames from the input path.
+    // Collect the input frame paths once; we'll cycle over them continuously.
     let frame_paths = collect_frame_paths(&args.input)?;
-    tracing::info!(frames = frame_paths.len(), input = %args.input.display(), "processing input");
+    tracing::info!(
+        frames = frame_paths.len(),
+        input = %args.input.display(),
+        "starting inference loop (loops continuously)"
+    );
 
     let mut tracker = Tracker::new();
     let mut line_counter = LineCounter::new(counting_line);
+    let mut global_frame_idx: u64 = 0;
 
-    for (frame_idx, frame_path) in frame_paths.iter().enumerate() {
-        let img = image::open(frame_path)
-            .with_context(|| format!("failed to open frame: {}", frame_path.display()))?;
+    // Loop indefinitely over the frame sequence so the demo plays continuously.
+    loop {
+        for frame_path in &frame_paths {
+            let img = image::open(frame_path)
+                .with_context(|| format!("failed to open frame: {}", frame_path.display()))?;
 
-        let (orig_w, orig_h) = (img.width(), img.height());
-        let (tensor, params) = preprocess::letterbox_and_normalise(&img);
+            let (orig_w, orig_h) = (img.width(), img.height());
+            let (tensor, params) = preprocess::letterbox_and_normalise(&img);
 
-        let raw_output = run_ort_inference(&mut session, tensor)?;
+            let raw_output = run_ort_inference(&mut session, tensor)?;
 
-        let detections = postprocess::decode_persons(
-            &raw_output,
-            &params,
-            args.conf,
-            args.nms_iou,
-            orig_w,
-            orig_h,
-        )?;
+            let detections = postprocess::decode_persons(
+                &raw_output,
+                &params,
+                args.conf,
+                args.nms_iou,
+                orig_w,
+                orig_h,
+            )?;
 
-        let tracks = tracker.update(&detections);
-        line_counter.update(tracks);
+            let tracks = tracker.update(&detections);
+            line_counter.update(tracks);
+            let tally = line_counter.tally();
 
-        let tally = line_counter.tally();
+            // Publish updated count tally.
+            match app_state.count.lock() {
+                Ok(mut state) => *state = tally,
+                Err(_) => tracing::warn!("count state mutex poisoned — skipping update"),
+            }
 
-        // Publish updated tally to dashboard state.
-        match count_state.lock() {
-            Ok(mut state) => *state = tally,
-            Err(_) => tracing::warn!("count state mutex poisoned — skipping update"),
+            // Annotate the frame and publish JPEG bytes to the stream channel.
+            let annotated = draw::annotate_frame(&img, tracks, counting_line, tally, &font);
+            match draw::encode_jpeg(&annotated, dashboard::STREAM_JPEG_QUALITY) {
+                Ok(jpeg_bytes) => {
+                    // send() only fails when all receivers have been dropped
+                    // (no active stream connections).  That is not an error.
+                    let _ = frame_tx.send(Some(Bytes::from(jpeg_bytes)));
+                }
+                Err(err) => {
+                    tracing::warn!("failed to encode frame as JPEG: {err:#}");
+                }
+            }
+
+            tracing::debug!(
+                frame = global_frame_idx,
+                persons = detections.len(),
+                tracks = tracks.len(),
+                entered = tally.entered,
+                left = tally.left,
+                net = tally.net(),
+            );
+
+            global_frame_idx += 1;
+
+            // Yield to the async runtime so the dashboard task can serve
+            // requests between frame processing steps.
+            tokio::task::yield_now().await;
         }
 
-        tracing::info!(
-            frame = frame_idx,
-            persons = detections.len(),
-            tracks = tracks.len(),
-            entered = tally.entered,
-            left = tally.left,
-            net = tally.net(),
+        tracing::debug!(
+            "input sequence exhausted after {} frames — looping",
+            frame_paths.len()
         );
     }
-
-    tracing::info!("input exhausted — dashboard remains live; press Ctrl-C to exit");
-
-    // Keep the process alive so the dashboard can still be queried.
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for Ctrl-C")?;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +246,7 @@ async fn main() -> Result<()> {
 /// # Errors
 ///
 /// Returns `Err` if the TCP listener fails to bind or if axum exits unexpectedly.
-async fn run_dashboard(state: CountState, bind_addr: SocketAddr) -> Result<()> {
+async fn run_dashboard(state: SharedAppState, bind_addr: SocketAddr) -> Result<()> {
     let app = dashboard::build_router(state);
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
@@ -304,7 +334,6 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    // Helper: create a temporary directory with the given filenames.
     fn temp_dir_with_files(names: &[&str]) -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         for name in names {

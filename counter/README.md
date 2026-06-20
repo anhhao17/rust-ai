@@ -1,10 +1,11 @@
 # counter — People Counter / Smart Camera
 
 Detects people in a video or image sequence, tracks them across frames, counts
-line crossings, and publishes a live count to a small web dashboard.
+line crossings, and publishes a **live annotated MJPEG video stream** and count
+stats to a small web dashboard.
 
 **Teaching point:** combining a YOLO object-detection model with stateful logic
-(tracking + counting).
+(tracking + counting) and real-time video output.
 
 ---
 
@@ -26,44 +27,53 @@ yolo export model=yolov8n.pt format=onnx imgsz=640
 ```bash
 cargo build --release
 
-# Single image
-./target/release/counter \
-  --model yolov8n.onnx \
-  --input photo.jpg
-
 # Directory of JPEG/PNG frames (e.g. extracted from a video with ffmpeg)
 ffmpeg -i video.mp4 -q:v 2 frames/frame_%06d.jpg
 
 ./target/release/counter \
   --model yolov8n.onnx \
   --input frames/ \
-  --line-x1 0 --line-y1 360 --line-x2 1280 --line-y2 360 \
+  --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576 \
   --bind 0.0.0.0:3000
 ```
 
-The counting line is defined by two points in image-pixel space.  The example
-above places a horizontal line at y=360 spanning the full 1280-pixel width,
-which is a sensible default for a 1280×720 scene.
+Then open **http://localhost:3000/** — you'll see the live annotated video with
+bounding boxes, track IDs, counting line, and the count stats below it.
+
+The counting line is defined by two pixel-space points.  The example above
+places a vertical line at x=384 for a 768×576 scene.  For a 1280×720 scene a
+horizontal mid-line would be `--line-x1 0 --line-y1 360 --line-x2 1280 --line-y2 360`.
+
+The frame sequence loops automatically when exhausted so the demo plays
+continuously without intervention.
+
+### Using the bundled pedestrian frames
+
+```bash
+./target/release/counter \
+  --model assets/yolov8n.onnx \
+  --input assets/walk-frames/ \
+  --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576 \
+  --bind 127.0.0.1:3010
+```
 
 ---
 
-## Dashboard
+## Dashboard & API
 
-Once running, open **http://localhost:3000/** in a browser.  The page polls
-`/count` every second and displays:
+| URL             | Description                                                |
+|-----------------|------------------------------------------------------------|
+| `GET /`         | HTML page: live MJPEG stream + count cards (auto-refresh)  |
+| `GET /stream`   | Raw MJPEG stream (`multipart/x-mixed-replace`)             |
+| `GET /count`    | `{"entered": N, "left": N, "net": N}` JSON                 |
+| `GET /health`   | `{"status": "ok"}` liveness probe                          |
 
-| Field   | Meaning                        |
-|---------|--------------------------------|
-| Entered | People who crossed inside→out  |
-| Left    | People who crossed out→inside  |
-| Net     | `entered − left`               |
-
-### API
-
-```
-GET /count   → {"entered": N, "left": N, "net": N}
-GET /health  → {"status": "ok"}
-```
+The `/stream` endpoint serves the browser's `<img src="/stream">` tag directly.
+Each frame is a JPEG annotated with:
+- cyan bounding boxes around each tracked person
+- track ID label above each box (e.g. `#7`)
+- red counting line
+- counts overlay (In / Out / Net) in the top-left corner
 
 ---
 
@@ -95,6 +105,16 @@ cargo build --features camera
    determined by the sign of the cross product of the line vector and the
    displacement vector.
 
-4. **Dashboard** — an axum HTTP server runs concurrently with the inference
-   loop via `tokio::spawn`.  The live tally is shared as
-   `Arc<Mutex<CountTally>>`.
+4. **Annotation** — `draw.rs` uses `imageproc` (drawing primitives) and an
+   embedded DejaVuSans font (`ab_glyph`) to burn boxes, labels, the line, and
+   count text into each RGBA frame.
+
+5. **MJPEG stream** — annotated frames are JPEG-encoded and published to a
+   `tokio::sync::watch` channel.  The `/stream` handler subscribes, assembles
+   `multipart/x-mixed-replace` parts, and streams them as an infinite
+   `axum::Body::from_stream`.  A slow browser client simply misses intermediate
+   frames (correct MJPEG semantics — no frame queue needed).
+
+6. **Dashboard** — the HTML page loads the MJPEG stream via a plain
+   `<img src="/stream">` tag, and polls `/count` every second for the numeric
+   stats.  Both run concurrently via `tokio::spawn`.
