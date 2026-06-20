@@ -1,0 +1,47 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+description = "Edge inference REST server — MobileNetV2 image classification over HTTP"
+
+[dependencies]
+# Async web framework
+axum = { version = "0.8", features = ["multipart"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# JSON (de)serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Middleware: request logging
+tower-http = { version = "0.6", features = ["trace"] }
+tower = { version = "0.5", features = ["util"] }
+
+# ONNX Runtime — CUDA EP registered; falls back to CPU automatically on non-GPU hosts
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+
+# Image decoding from raw bytes
+image = "0.25"
+
+# NCHW tensor layout
+ndarray = "0.17"
+
+# Error handling
+anyhow = "1"
+
+# Config: CLI args with env var fallback
+clap = { version = "4", features = ["derive", "env"] }
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Floating-point assertions
+approx = "0.5"
+
+# Oneshot HTTP tests against axum handlers
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
