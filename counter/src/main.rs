@@ -1,26 +1,25 @@
 //! `counter` — people counter with YOLOv8 detection, multi-object tracking,
 //! line-crossing counting, annotated MJPEG video stream, and a live dashboard.
 //!
-//! # What it does
+//! # Sources (`--source`)
 //!
-//! 1. Loads a YOLOv8n ONNX model (person class only).
-//! 2. Reads frames from an image directory, loops when exhausted so the demo
-//!    keeps playing indefinitely.
-//! 3. Runs per-frame person detection → multi-object tracking → line-crossing
-//!    counting.
-//! 4. Annotates each frame (bounding boxes, track IDs, counting line, counts
-//!    overlay) and publishes the JPEG to a `tokio::sync::watch` channel.
-//! 5. Serves a live dashboard over HTTP:
-//!    - `GET /`       — HTML page with embedded MJPEG stream and count stats
-//!    - `GET /stream` — MJPEG video stream
-//!    - `GET /count`  — live count as JSON
-//!    - `GET /health` — liveness probe
+//! | Value | Behaviour |
+//! |-------|-----------|
+//! | `/path/to/dir` | Sorted JPEG/PNG images (loops by default) |
+//! | `/path/to/video.mp4` (or .avi, .mkv, …) | ffmpeg file decode |
+//! | `rtsp://…` / `http://…` / `https://…` / `hls://…` | ffmpeg network stream |
+//! | `0` / `camera:0` | V4L2 camera (requires `--features camera`) |
 //!
 //! # Usage
 //!
 //! ```text
-//! counter --model yolov8n.onnx --input assets/walk-frames/ \
+//! counter --model yolov8n.onnx --source assets/walk-frames/ \
 //!         --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576
+//!
+//! counter --model yolov8n.onnx --source assets/walk.avi --no-loop
+//!
+//! counter --model yolov8n.onnx --source rtsp://192.168.1.1:554/live \
+//!         --fps 15 --bind 0.0.0.0:3000
 //! ```
 //!
 //! Dashboard: http://localhost:3000/
@@ -36,7 +35,12 @@
 //! The session builder registers CUDA first then falls back to CPU.  No GPU or
 //! model file is required for `cargo build` or `cargo test`.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -48,13 +52,16 @@ use vision_core::session::build_session;
 
 mod dashboard;
 mod draw;
+mod ffmpeg;
 mod line_counter;
 mod postprocess;
 mod preprocess;
+mod source;
 mod tracker;
 
 use dashboard::SharedAppState;
 use line_counter::{CountingLine, LineCounter};
+use source::{SourceKind, detect_source_kind};
 use tracker::Tracker;
 
 // ---------------------------------------------------------------------------
@@ -86,11 +93,10 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     model: PathBuf,
 
-    /// Input: path to a single image file or a directory of JPEG/PNG images.
-    /// When all images are processed the loop restarts from the beginning so
-    /// the demo plays continuously.
-    #[arg(long, value_name = "PATH")]
-    input: PathBuf,
+    /// Video source: image directory, video file, RTSP/HTTP/HLS URL, or
+    /// camera index (e.g. `0` or `camera:0`; requires the `camera` feature).
+    #[arg(long, value_name = "SOURCE")]
+    source: String,
 
     /// Counting-line start point — x coordinate (pixels).
     #[arg(long, default_value_t = 0.0)]
@@ -119,6 +125,43 @@ struct Args {
     /// HTTP address for the dashboard (e.g. 0.0.0.0:3000).
     #[arg(long, default_value = DEFAULT_BIND_ADDR)]
     bind: SocketAddr,
+
+    /// Loop the source after it is exhausted (default: on for finite sources).
+    /// Automatically disabled for live sources (camera, network stream).
+    /// Pass `--no-loop` to play a file once and then keep the server alive.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    loop_source: bool,
+
+    /// Cap output to at most N frames per second.  0 = uncapped (default).
+    /// Useful for file playback at a natural rate and for reducing CPU load on
+    /// fast inference hardware.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    fps: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline context
+// ---------------------------------------------------------------------------
+
+/// Shared inference state threaded through every source runner.
+///
+/// Grouping these into one struct keeps the per-source entry points to a
+/// manageable number of arguments and makes it easy to add new fields later
+/// without changing every call site.
+///
+/// The `'static` bound on `FontRef` is satisfied because the font bytes are
+/// embedded via `include_bytes!` and therefore live for the duration of the
+/// process.
+struct PipelineCtx {
+    session: Session,
+    tracker: Tracker,
+    line_counter: LineCounter,
+    counting_line: CountingLine,
+    font: ab_glyph::FontRef<'static>,
+    app_state: SharedAppState,
+    frame_tx: dashboard::FrameTx,
+    conf: f32,
+    nms_iou: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +181,34 @@ async fn main() -> Result<()> {
         end: (args.line_x2, args.line_y2),
     };
 
+    // Detect source type early so we can fail fast before starting the server.
+    let source_kind = detect_source_kind(&args.source)
+        .with_context(|| format!("invalid --source '{}'", args.source))?;
+
+    // Live sources cannot loop — override any explicit --loop-source=true.
+    let should_loop = args.loop_source && source_kind.is_finite();
+
+    tracing::info!(
+        source = %args.source,
+        kind = ?source_kind,
+        loop_source = should_loop,
+        fps_cap = args.fps,
+        "source detected"
+    );
+
+    // Validate that camera sources have the feature compiled in.
+    if matches!(source_kind, SourceKind::Camera(_)) {
+        #[cfg(not(feature = "camera"))]
+        return Err(anyhow!(
+            "camera source requires the `camera` cargo feature; \
+             rebuild with `--features camera`"
+        ));
+    }
+
     // Build shared state and the frame-publishing channel.
     let (app_state, frame_tx) = dashboard::new_state();
 
-    // Spawn the dashboard server in a background task so inference runs
-    // concurrently with the HTTP server without blocking either.
+    // Spawn the dashboard server in a background task.
     let dashboard_state: SharedAppState = Arc::clone(&app_state);
     let bind_addr = args.bind;
     tokio::spawn(async move {
@@ -153,93 +219,268 @@ async fn main() -> Result<()> {
 
     tracing::info!(bind = %args.bind, "dashboard started — open http://{}/", args.bind);
 
-    // Load the font once at startup; reused for every frame annotation.
     let font = draw::load_font().context("failed to load embedded font")?;
+    let session = build_session(&args.model)?;
 
-    // Load the model.  Missing model file → clear error and exit.
-    let mut session = build_session(&args.model)?;
+    let mut ctx = PipelineCtx {
+        session,
+        tracker: Tracker::new(),
+        line_counter: LineCounter::new(counting_line),
+        counting_line,
+        font,
+        app_state,
+        frame_tx,
+        conf: args.conf,
+        nms_iou: args.nms_iou,
+    };
 
-    // Collect the input frame paths once; we'll cycle over them continuously.
-    let frame_paths = collect_frame_paths(&args.input)?;
+    let min_frame_interval = fps_cap_interval(args.fps);
+
+    // Dispatch to the appropriate source reader.
+    match source_kind {
+        SourceKind::FrameDir(ref dir_path) => {
+            run_frame_dir_loop(dir_path, should_loop, min_frame_interval, &mut ctx).await?;
+        }
+        SourceKind::VideoFile(ref file_path) => {
+            run_ffmpeg_loop(
+                file_path.to_str().unwrap_or_default(),
+                should_loop,
+                min_frame_interval,
+                &mut ctx,
+            )
+            .await?;
+        }
+        SourceKind::NetworkStream(ref url) => {
+            // Network sources never loop; `should_loop` was already set to false.
+            run_ffmpeg_loop(url, should_loop, min_frame_interval, &mut ctx).await?;
+        }
+        SourceKind::Camera(_device_index) => {
+            #[cfg(feature = "camera")]
+            run_camera_loop(_device_index, min_frame_interval, &mut ctx).await?;
+
+            #[cfg(not(feature = "camera"))]
+            // Unreachable: we already returned Err above for Camera without the feature.
+            // This arm is present to satisfy the exhaustiveness check.
+            unreachable!("camera source without camera feature");
+        }
+    }
+
+    tracing::info!("source exhausted — dashboard remains live; press Ctrl-C to exit");
+
+    // Keep the process alive so the dashboard can still be queried.
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl-C")?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Source runners
+// ---------------------------------------------------------------------------
+
+/// Runs the inference loop over a directory of image files (or a single image
+/// file).  Loops when `should_loop` is true.
+async fn run_frame_dir_loop(
+    dir_path: &std::path::Path,
+    should_loop: bool,
+    min_frame_interval: Option<Duration>,
+    ctx: &mut PipelineCtx,
+) -> Result<()> {
+    let frame_paths = collect_frame_paths(dir_path)?;
     tracing::info!(
         frames = frame_paths.len(),
-        input = %args.input.display(),
-        "starting inference loop (loops continuously)"
+        source = %dir_path.display(),
+        loop_source = should_loop,
+        "starting frame-dir inference loop"
     );
 
-    let mut tracker = Tracker::new();
-    let mut line_counter = LineCounter::new(counting_line);
-    let mut global_frame_idx: u64 = 0;
+    let mut frame_idx: u64 = 0;
 
-    // Loop indefinitely over the frame sequence so the demo plays continuously.
     loop {
         for frame_path in &frame_paths {
             let img = image::open(frame_path)
                 .with_context(|| format!("failed to open frame: {}", frame_path.display()))?;
 
-            let (orig_w, orig_h) = (img.width(), img.height());
-            let (tensor, params) = preprocess::letterbox_and_normalise(&img);
+            process_frame(img, frame_idx, min_frame_interval, ctx).await?;
 
-            let raw_output = run_ort_inference(&mut session, tensor)?;
+            frame_idx += 1;
+        }
 
-            let detections = postprocess::decode_persons(
-                &raw_output,
-                &params,
-                args.conf,
-                args.nms_iou,
-                orig_w,
-                orig_h,
-            )?;
-
-            let tracks = tracker.update(&detections);
-            line_counter.update(tracks);
-            let tally = line_counter.tally();
-
-            // Publish updated count tally.
-            match app_state.count.lock() {
-                Ok(mut state) => *state = tally,
-                Err(_) => tracing::warn!("count state mutex poisoned — skipping update"),
-            }
-
-            // Annotate the frame and publish JPEG bytes to the stream channel.
-            let annotated = draw::annotate_frame(&img, tracks, counting_line, tally, &font);
-            match draw::encode_jpeg(&annotated, dashboard::STREAM_JPEG_QUALITY) {
-                Ok(jpeg_bytes) => {
-                    // send() only fails when all receivers have been dropped
-                    // (no active stream connections).  That is not an error.
-                    let _ = frame_tx.send(Some(Bytes::from(jpeg_bytes)));
-                }
-                Err(err) => {
-                    tracing::warn!("failed to encode frame as JPEG: {err:#}");
-                }
-            }
-
-            tracing::debug!(
-                frame = global_frame_idx,
-                persons = detections.len(),
-                tracks = tracks.len(),
-                entered = tally.entered,
-                left = tally.left,
-                net = tally.net(),
-            );
-
-            global_frame_idx += 1;
-
-            // Yield to the async runtime so the dashboard task can serve
-            // requests between frame processing steps.
-            tokio::task::yield_now().await;
+        if !should_loop {
+            break;
         }
 
         tracing::debug!(
-            "input sequence exhausted after {} frames — looping",
+            "frame-dir sequence exhausted after {} frames — looping",
             frame_paths.len()
         );
     }
+
+    Ok(())
+}
+
+/// Runs the inference loop reading frames from an ffmpeg subprocess.
+/// Used for both local video files and network streams.
+async fn run_ffmpeg_loop(
+    source: &str,
+    should_loop: bool,
+    min_frame_interval: Option<Duration>,
+    ctx: &mut PipelineCtx,
+) -> Result<()> {
+    let mut frame_idx: u64 = 0;
+
+    loop {
+        tracing::info!(source, "spawning ffmpeg");
+
+        let mut reader = ffmpeg::FfmpegReader::spawn(source)?;
+
+        while let Some(frame_result) = reader.recv() {
+            match frame_result {
+                Ok(img) => {
+                    process_frame(img, frame_idx, min_frame_interval, ctx).await?;
+                    frame_idx += 1;
+                }
+                Err(err) => {
+                    // A single bad frame is logged and skipped; we do not abort.
+                    tracing::warn!("frame decode error (frame {frame_idx}): {err:#}");
+                }
+            }
+        }
+
+        // Wait for ffmpeg to clean up.
+        let status = reader.wait()?;
+        tracing::info!(exit_code = ?status.code(), "ffmpeg exited");
+
+        if !should_loop {
+            break;
+        }
+
+        tracing::debug!(frame_idx, "ffmpeg source exhausted — looping");
+    }
+
+    Ok(())
+}
+
+/// Camera capture loop — compiled only when the `camera` feature is enabled.
+#[cfg(feature = "camera")]
+async fn run_camera_loop(
+    device: u32,
+    min_frame_interval: Option<Duration>,
+    ctx: &mut PipelineCtx,
+) -> Result<()> {
+    use image::DynamicImage;
+    use nokhwa::{
+        Camera,
+        pixel_format::RgbFormat,
+        utils::{CameraIndex, RequestedFormat, RequestedFormatType},
+    };
+
+    let mut camera = Camera::new(
+        CameraIndex::Index(device),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+    )
+    .with_context(|| format!("failed to open camera device {device}"))?;
+
+    camera
+        .open_stream()
+        .context("failed to open camera stream")?;
+
+    tracing::info!(device, "camera stream opened");
+
+    let mut frame_idx: u64 = 0;
+    loop {
+        let buffer = camera.frame().context("failed to capture camera frame")?;
+        let rgb_buf = buffer
+            .decode_image::<RgbFormat>()
+            .context("failed to decode camera frame")?;
+        let img = DynamicImage::ImageRgb8(rgb_buf);
+
+        process_frame(img, frame_idx, min_frame_interval, ctx).await?;
+        frame_idx += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared per-frame processing
+// ---------------------------------------------------------------------------
+
+/// Runs detection → tracking → counting → annotation → publish on one frame.
+///
+/// All source runners call this function so the inference pipeline is defined
+/// exactly once.
+async fn process_frame(
+    img: image::DynamicImage,
+    frame_idx: u64,
+    min_frame_interval: Option<Duration>,
+    ctx: &mut PipelineCtx,
+) -> Result<()> {
+    let frame_start = Instant::now();
+
+    let (orig_w, orig_h) = (img.width(), img.height());
+    let (tensor, params) = preprocess::letterbox_and_normalise(&img);
+    let raw_output = run_ort_inference(&mut ctx.session, tensor)?;
+
+    let detections =
+        postprocess::decode_persons(&raw_output, &params, ctx.conf, ctx.nms_iou, orig_w, orig_h)?;
+
+    let tracks = ctx.tracker.update(&detections);
+    ctx.line_counter.update(tracks);
+    let tally = ctx.line_counter.tally();
+
+    // Publish count.
+    match ctx.app_state.count.lock() {
+        Ok(mut state) => *state = tally,
+        Err(_) => tracing::warn!("count state mutex poisoned — skipping update"),
+    }
+
+    // Annotate and publish JPEG frame.
+    let annotated = draw::annotate_frame(&img, tracks, ctx.counting_line, tally, &ctx.font);
+    match draw::encode_jpeg(&annotated, dashboard::STREAM_JPEG_QUALITY) {
+        Ok(jpeg_bytes) => {
+            let _ = ctx.frame_tx.send(Some(Bytes::from(jpeg_bytes)));
+        }
+        Err(err) => tracing::warn!("failed to JPEG-encode frame {frame_idx}: {err:#}"),
+    }
+
+    tracing::debug!(
+        frame = frame_idx,
+        persons = detections.len(),
+        tracks = tracks.len(),
+        entered = tally.entered,
+        left = tally.left,
+        net = tally.net(),
+    );
+
+    // Yield so the dashboard task can serve requests.
+    tokio::task::yield_now().await;
+
+    // FPS cap: sleep for the remainder of the minimum inter-frame interval.
+    if let Some(interval) = min_frame_interval {
+        let elapsed = frame_start.elapsed();
+        if elapsed < interval {
+            tokio::time::sleep(interval - elapsed).await;
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns the minimum inter-frame interval for an FPS cap, or `None` for
+/// uncapped.
+///
+/// `fps == 0` means uncapped.
+fn fps_cap_interval(fps: u32) -> Option<Duration> {
+    if fps == 0 {
+        None
+    } else {
+        Some(Duration::from_secs_f64(1.0 / fps as f64))
+    }
+}
 
 /// Starts the axum dashboard server on `bind_addr`.
 ///
@@ -288,9 +529,9 @@ fn run_ort_inference(session: &mut Session, tensor: Array4<f32>) -> Result<Vec<f
 /// # Errors
 ///
 /// Returns `Err` if `input_path` does not exist or is not a file/directory.
-fn collect_frame_paths(input_path: &PathBuf) -> Result<Vec<PathBuf>> {
+fn collect_frame_paths(input_path: &std::path::Path) -> Result<Vec<PathBuf>> {
     if input_path.is_file() {
-        return Ok(vec![input_path.clone()]);
+        return Ok(vec![input_path.to_path_buf()]);
     }
 
     if !input_path.is_dir() {
@@ -353,16 +594,14 @@ mod tests {
     #[test]
     fn collect_frame_paths_filters_non_image_files() {
         let dir = temp_dir_with_files(&["a.jpg", "b.png", "c.txt", "d.onnx"]);
-        let path = dir.path().to_path_buf();
-        let result = collect_frame_paths(&path).unwrap();
+        let result = collect_frame_paths(dir.path()).unwrap();
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn collect_frame_paths_returns_sorted_order() {
         let dir = temp_dir_with_files(&["c.jpg", "a.jpg", "b.jpg"]);
-        let path = dir.path().to_path_buf();
-        let result = collect_frame_paths(&path).unwrap();
+        let result = collect_frame_paths(dir.path()).unwrap();
         let names: Vec<String> = result
             .iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
@@ -373,7 +612,7 @@ mod tests {
     #[test]
     fn collect_frame_paths_errors_on_empty_directory() {
         let dir = temp_dir_with_files(&[]);
-        let result = collect_frame_paths(&dir.path().to_path_buf());
+        let result = collect_frame_paths(dir.path());
         assert!(result.is_err(), "empty directory should produce Err");
     }
 
@@ -382,5 +621,23 @@ mod tests {
         let path = PathBuf::from("/tmp/counter_test_nonexistent_xyz");
         let result = collect_frame_paths(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fps_cap_zero_means_uncapped() {
+        assert!(fps_cap_interval(0).is_none());
+    }
+
+    #[test]
+    fn fps_cap_30_gives_correct_interval() {
+        let interval = fps_cap_interval(30).unwrap();
+        // 1/30 s ≈ 33.3 ms
+        assert!((interval.as_secs_f64() - 1.0 / 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fps_cap_1_gives_one_second_interval() {
+        let interval = fps_cap_interval(1).unwrap();
+        assert!((interval.as_secs_f64() - 1.0).abs() < 1e-6);
     }
 }

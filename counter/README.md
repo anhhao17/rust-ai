@@ -26,36 +26,86 @@ yolo export model=yolov8n.pt format=onnx imgsz=640
 
 ```bash
 cargo build --release
+```
 
-# Directory of JPEG/PNG frames (e.g. extracted from a video with ffmpeg)
+### Image-frame directory
+
+```bash
+# Extract frames from a video first (if needed)
 ffmpeg -i video.mp4 -q:v 2 frames/frame_%06d.jpg
 
 ./target/release/counter \
   --model yolov8n.onnx \
-  --input frames/ \
+  --source frames/ \
   --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576 \
   --bind 0.0.0.0:3000
 ```
 
-Then open **http://localhost:3000/** — you'll see the live annotated video with
-bounding boxes, track IDs, counting line, and the count stats below it.
-
-The counting line is defined by two pixel-space points.  The example above
-places a vertical line at x=384 for a 768×576 scene.  For a 1280×720 scene a
-horizontal mid-line would be `--line-x1 0 --line-y1 360 --line-x2 1280 --line-y2 360`.
-
-The frame sequence loops automatically when exhausted so the demo plays
-continuously without intervention.
-
-### Using the bundled pedestrian frames
+### Video file (decoded via ffmpeg)
 
 ```bash
 ./target/release/counter \
-  --model assets/yolov8n.onnx \
-  --input assets/walk-frames/ \
-  --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576 \
-  --bind 127.0.0.1:3010
+  --model yolov8n.onnx \
+  --source assets/walk.avi \
+  --fps 10 \
+  --line-x1 384 --line-y1 0 --line-x2 384 --line-y2 576
 ```
+
+Add `--no-loop` to stop after the first playthrough instead of looping.
+
+### RTSP / HTTP(S) / HLS network stream
+
+```bash
+./target/release/counter \
+  --model yolov8n.onnx \
+  --source rtsp://192.168.1.100:554/live \
+  --fps 15 \
+  --line-x1 640 --line-y1 0 --line-x2 640 --line-y2 720 \
+  --bind 0.0.0.0:3000
+```
+
+Live streams never loop and run until interrupted (Ctrl-C).  HTTP(S) and HLS
+URLs (e.g. `http://…/stream.m3u8`) are also supported.
+
+### V4L2 camera (requires `--features camera`)
+
+```bash
+cargo build --release --features camera
+
+./target/release/counter \
+  --model yolov8n.onnx \
+  --source 0 \
+  --line-x1 640 --line-y1 0 --line-x2 640 --line-y2 480
+```
+
+`0` means `/dev/video0`.  Use `camera:1` for the second device.
+
+---
+
+## `--source` argument
+
+The `--source` value is auto-detected in this order:
+
+| Pattern | Behaviour |
+|---------|-----------|
+| Existing **directory** | Sorted JPEG/PNG images; loops by default |
+| Bare integer or `camera:N` | V4L2 device N (requires `camera` feature) |
+| `rtsp://`, `rtsps://`, `http://`, `https://`, `hls://` prefix | ffmpeg network decode |
+| Existing file with video extension (`.mp4`, `.avi`, `.mkv`, …) | ffmpeg file decode |
+| Existing file with image extension (`.jpg`, `.jpeg`, `.png`) | Single-frame list |
+
+---
+
+## Additional flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--fps N` | 0 (uncapped) | Cap inference output to N frames per second.  Useful for file playback at natural speed or for reducing CPU load. |
+| `--loop-source` / `--no-loop` | on for finite sources | Loop the source after it is exhausted.  Automatically disabled for live sources (camera, network stream). |
+| `--conf F` | 0.25 | Minimum detection confidence (0–1). |
+| `--nms-iou F` | 0.45 | IoU threshold for non-maximum suppression. |
+| `--bind ADDR` | 0.0.0.0:3000 | TCP address for the dashboard HTTP server. |
+| `--line-x1 / --line-y1 / --line-x2 / --line-y2` | — | Counting-line endpoints in pixel space. |
 
 ---
 
@@ -90,6 +140,17 @@ cargo build --features camera
 
 ---
 
+## Bundled assets
+
+| File | Notes |
+|------|-------|
+| `assets/walk-frames/` | 795 JPEG frames from a pedestrian scene (768×576) |
+| `assets/walk.avi` | Source video (msmpeg4v3, 10 fps) |
+| `assets/DejaVuSans.ttf` | Font embedded at compile-time via `include_bytes!` |
+| `assets/DejaVuSans-LICENSE.txt` | Bitstream Vera / DejaVu permissive licence |
+
+---
+
 ## How it works
 
 1. **Detection** — each frame is letterbox-resized to 640×640 and fed to
@@ -109,12 +170,18 @@ cargo build --features camera
    embedded DejaVuSans font (`ab_glyph`) to burn boxes, labels, the line, and
    count text into each RGBA frame.
 
-5. **MJPEG stream** — annotated frames are JPEG-encoded and published to a
+5. **Multi-source decode** — `source.rs` classifies the `--source` argument
+   and dispatches to the appropriate reader: a directory walker, an ffmpeg
+   subprocess (`ffmpeg.rs`), or a V4L2 camera.  ffmpeg decodes any container
+   or protocol it supports and pipes JPEG frames to the inference loop via an
+   OS thread + `std::sync::mpsc`.
+
+6. **MJPEG stream** — annotated frames are JPEG-encoded and published to a
    `tokio::sync::watch` channel.  The `/stream` handler subscribes, assembles
    `multipart/x-mixed-replace` parts, and streams them as an infinite
    `axum::Body::from_stream`.  A slow browser client simply misses intermediate
    frames (correct MJPEG semantics — no frame queue needed).
 
-6. **Dashboard** — the HTML page loads the MJPEG stream via a plain
+7. **Dashboard** — the HTML page loads the MJPEG stream via a plain
    `<img src="/stream">` tag, and polls `/count` every second for the numeric
    stats.  Both run concurrently via `tokio::spawn`.
