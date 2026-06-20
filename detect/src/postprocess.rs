@@ -10,6 +10,8 @@
 //! 3. Convert cx/cy/w/h → x1/y1/x2/y2 in original image coordinates.
 //! 4. Apply class-aware NMS (non-maximum suppression).
 
+use anyhow::{Result, anyhow};
+
 use crate::preprocess::LetterboxParams;
 
 /// Number of COCO classes in YOLOv8.
@@ -67,6 +69,11 @@ impl Detection {
 ///
 /// `raw` must be the flat slice from the `[1, 84, 8400]` output tensor
 /// (row-major order: all 8400 values for cx, then cy, w, h, class0…class79).
+///
+/// Returns an error instead of panicking if `raw` has the wrong length — a
+/// different YOLOv8 variant (different `imgsz`, segmentation model, etc.) can
+/// produce a differently-sized tensor, and a panic would abort camera capture
+/// on the first frame.
 pub fn decode_yolov8_output(
     raw: &[f32],
     params: &LetterboxParams,
@@ -74,12 +81,18 @@ pub fn decode_yolov8_output(
     nms_iou_threshold: f32,
     orig_w: u32,
     orig_h: u32,
-) -> Vec<Detection> {
-    assert_eq!(
-        raw.len(),
-        (BOX_COORDS + NUM_CLASSES) * NUM_ANCHORS,
-        "unexpected output tensor size"
-    );
+) -> Result<Vec<Detection>> {
+    let expected = (BOX_COORDS + NUM_CLASSES) * NUM_ANCHORS;
+    if raw.len() != expected {
+        return Err(anyhow!(
+            "unexpected YOLOv8 output size: got {}, expected {} \
+             ({}×{} anchors — did you use a different imgsz or model variant?)",
+            raw.len(),
+            expected,
+            BOX_COORDS + NUM_CLASSES,
+            NUM_ANCHORS,
+        ));
+    }
 
     // Transpose [84, 8400] → candidates filtered by confidence.
     // Row layout: cx(8400), cy(8400), w(8400), h(8400), class0(8400), …, class79(8400).
@@ -115,7 +128,7 @@ pub fn decode_yolov8_output(
         });
     }
 
-    non_max_suppression(candidates, nms_iou_threshold)
+    Ok(non_max_suppression(candidates, nms_iou_threshold))
 }
 
 /// Converts a center-format bounding box from model-input space (0–640) to
@@ -244,6 +257,32 @@ mod tests {
         ];
         let result = non_max_suppression(detections, 0.5);
         assert_eq!(result.len(), 2);
+    }
+
+    // --- decode_yolov8_output size validation ---
+
+    #[test]
+    fn wrong_length_raw_returns_err_not_panic() {
+        // A tensor with one fewer element than expected must return Err, not panic.
+        // This covers the case of a different imgsz or model variant at runtime.
+        let params = identity_params();
+        let too_short = vec![0.0_f32; (BOX_COORDS + NUM_CLASSES) * NUM_ANCHORS - 1];
+        let result = decode_yolov8_output(&too_short, &params, 0.25, 0.45, 640, 640);
+        assert!(
+            result.is_err(),
+            "expected Err for wrong-length input, got Ok"
+        );
+    }
+
+    #[test]
+    fn correct_length_raw_returns_ok_with_no_detections() {
+        // An all-zero tensor of the right size should decode cleanly (no
+        // detections above any reasonable threshold).
+        let params = identity_params();
+        let zeros = vec![0.0_f32; (BOX_COORDS + NUM_CLASSES) * NUM_ANCHORS];
+        let result = decode_yolov8_output(&zeros, &params, 0.25, 0.45, 640, 640);
+        assert!(result.is_ok(), "expected Ok for correct-length input");
+        assert!(result.unwrap().is_empty());
     }
 
     // --- model_box_to_image_coords tests ---

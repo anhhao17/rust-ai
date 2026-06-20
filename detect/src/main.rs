@@ -6,12 +6,13 @@
 //!
 //! # Usage — single image
 //! ```text
-//! detect --model yolov8n.onnx --image photo.jpg --output annotated.jpg
+//! detect --model yolov8n.onnx image --input photo.jpg
+//! detect --model yolov8n.onnx image --input photo.jpg --output annotated.jpg
 //! ```
 //!
 //! # Usage — live camera
 //! ```text
-//! detect --model yolov8n.onnx --camera 0 --output-dir ./frames
+//! detect --model yolov8n.onnx camera --device 0 --output-dir ./frames
 //! ```
 
 use anyhow::{Context, Result, anyhow};
@@ -284,7 +285,7 @@ fn detect_in_frame(
     let logits = run_inference(session, tensor)?;
 
     let detections =
-        postprocess::decode_yolov8_output(&logits, &params, conf, nms_iou, orig_w, orig_h);
+        postprocess::decode_yolov8_output(&logits, &params, conf, nms_iou, orig_w, orig_h)?;
 
     Ok(detections)
 }

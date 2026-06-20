@@ -26,8 +26,6 @@ anyhow = "1"
 # Camera capture — V4L2 on Linux/Jetson, native on other platforms
 nokhwa = { version = "0.10", features = ["input-v4l", "output-threaded"] }
 
-# Shared COCO class labels (80 classes)
-once_cell = "1"
 
 [dev-dependencies]
 approx = "0.5"
