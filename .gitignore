@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target/
+
+# Downloaded model files and sample media (obtained via scripts/setup-demo.sh)
+/assets/
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
